@@ -56,6 +56,12 @@
     .clickable { cursor: pointer; }
     .empty { text-align:center; color:var(--muted); padding:16px; }
 
+    .statusPill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border:1px solid #334155; border-radius:999px; font-size:12px; }
+    .statusPill.ok { border-color: var(--ok); color: var(--ok); }
+    .statusPill.warn { border-color: var(--warn); color: var(--warn); }
+    .statusPill.bad { border-color: var(--bad); color: var(--bad); }
+    .cloudBanner { display:none; margin-top:8px; padding:8px 10px; border:1px solid #334155; border-radius:10px; background:#0b1220; font-size:13px; }
+
     /* Mobile card tables */
     @media (max-width: 640px){
       table.resp { border:0; }
@@ -90,6 +96,10 @@
         </select>
         <span id="roleBadge" class="roleBadge">Athlete</span>
       </span>
+      <span id="cloudStatus" class="statusPill warn">Cloud: Checking…</span>
+
+      <button class="btn" id="btnForcePull" title="Fetch latest from cloud">Cloud Pull</button>
+      <button class="btn" id="btnForcePush" title="Push local to cloud">Cloud Push</button>
       <button class="btn" id="btnCoachLogin">Coach Login</button>
       <button class="btn bad hidden" id="btnCoachLogout">Sign Out (Coach)</button>
     </div>
@@ -282,6 +292,7 @@
       <button class="btn bad" id="btnWipe">Wipe ALL Data</button>
     </div>
     <p class="muted">Data is synced via Supabase when available; otherwise stored locally on this device.</p>
+    <div id="cloudDiag" class="cloudBanner"></div>
     <pre id="exportBox" style="white-space:pre-wrap; background:#0b1220; border:1px solid #334155; border-radius:12px; padding:12px; display:none;"></pre>
   </section>
 </main>
@@ -299,6 +310,43 @@ const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const CLOUD_TABLE = 'equipment_data';  // one-row JSON store
 const CLOUD_ROW_ID = 'singleton';
 let CLOUD_ENABLED = false;             // flips true if cloud is reachable
+
+let CLOUD_PULL_TIMER = null;
+let CLOUD_LAST_SNAPSHOT = null; // stringified snapshot for change detection
+
+function setCloudStatus(mode, message) {
+  const pill = document.getElementById('cloudStatus');
+  const diag = document.getElementById('cloudDiag');
+  if (!pill) return;
+  pill.classList.remove('ok','warn','bad');
+  if (mode === 'on') { pill.classList.add('ok'); pill.textContent = 'Cloud: ON'; }
+  else if (mode === 'off') { pill.classList.add('bad'); pill.textContent = 'Cloud: OFF'; }
+  else { pill.classList.add('warn'); pill.textContent = 'Cloud: Checking…'; }
+  if (diag) {
+    if (message) { diag.style.display = 'block'; diag.textContent = message; }
+    else { diag.style.display = 'none'; diag.textContent = ''; }
+  }
+}
+
+function snapshot(dbObj){
+  try { return JSON.stringify(dbObj); } catch { return null; }
+}
+
+function applyFromCloud(dataObj){
+  try {
+    if (!dataObj || typeof dataObj !== 'object') return false;
+    const incoming = dataObj;
+    const incomingSnap = snapshot(incoming);
+    if (incomingSnap && incomingSnap !== CLOUD_LAST_SNAPSHOT) {
+      db = incoming;
+      CLOUD_LAST_SNAPSHOT = incomingSnap;
+      saveLocal(); // keep offline copy
+      refreshAll();
+      return true;
+    }
+    return false;
+  } catch { return false; }
+}
 
 // ==============================
 // In-browser app state (db)
@@ -349,30 +397,56 @@ function loadLocal(){
 
 // Cloud: single JSON row { id:'singleton', data: <db> }
 async function cloudLoad(){
-  try{
-    const { data, error } = await supa.from(CLOUD_TABLE).select('data').eq('id', CLOUD_ROW_ID).maybeSingle();
-    if(error){ console.warn('Cloud load error:', error.message); return false; }
-    if(data?.data){
-      db = data.data;
-    } else {
-      // first-time: push seed to cloud
-      if (!db.equipment?.length) seed();
-      await cloudSave();
+  try {
+    const { data, error } = await supa.from(CLOUD_TABLE)
+      .select('data')
+      .eq('id', CLOUD_ROW_ID)
+      .maybeSingle();
+
+    if (error) {
+      console.warn('Cloud load error:', error.message);
+      setCloudStatus('off', `Cloud load error: ${error.message}. Using local storage.`);
+      return false;
     }
-    return true;
-  } catch(err){
+
+    if (data && data.data) {
+      applyFromCloud(data.data);
+      setCloudStatus('on');
+      return true;
+    }
+
+    // No row yet: seed locally and try to create it
+    if (!db.equipment?.length) seed();
+    const pushed = await cloudSave();
+    if (pushed) {
+      setCloudStatus('on', 'Initialized cloud with seed data.');
+      CLOUD_LAST_SNAPSHOT = snapshot(db);
+      return true;
+    } else {
+      setCloudStatus('off', 'Could not initialize cloud (RLS/policy?). Working locally.');
+      return false;
+    }
+  } catch (err) {
     console.warn('Cloud load failed:', err);
+    setCloudStatus('off', 'Cloud unreachable. Working locally.');
     return false;
   }
 }
 async function cloudSave(){
-  try{
+  try {
     const payload = { id: CLOUD_ROW_ID, data: db };
     const { error } = await supa.from(CLOUD_TABLE).upsert(payload);
-    if(error){ console.warn('Cloud save error:', error.message); return false; }
+    if (error) {
+      console.warn('Cloud save error:', error.message);
+      setCloudStatus('off', `Cloud save error: ${error.message}. Changes saved locally only.`);
+      return false;
+    }
+    setCloudStatus('on');
+    CLOUD_LAST_SNAPSHOT = snapshot(db);
     return true;
-  } catch(err){
+  } catch (err) {
     console.warn('Cloud save failed:', err);
+    setCloudStatus('off', 'Cloud save failed. Changes saved locally only.');
     return false;
   }
 }
@@ -388,17 +462,45 @@ async function save(){
   }
 }
 
+function startCloudPullLoop(){
+  if (CLOUD_PULL_TIMER) clearInterval(CLOUD_PULL_TIMER);
+  if (!CLOUD_ENABLED) return;
+  CLOUD_PULL_TIMER = setInterval(async ()=>{
+    try {
+      const { data, error } = await supa.from(CLOUD_TABLE)
+        .select('data')
+        .eq('id', CLOUD_ROW_ID)
+        .maybeSingle();
+      if (!error && data && data.data) {
+        applyFromCloud(data.data);
+        setCloudStatus('on');
+      }
+    } catch (e) {
+      console.warn('Cloud poll error:', e);
+      setCloudStatus('off', 'Cloud poll error.');
+    }
+  }, 6000); // every 6s
+}
+
 async function boot(){
-  // Try cloud first; if the table doesn't exist, we’ll fall back to local.
+  // Try cloud first
   const ok = await cloudLoad();
-  if(ok){
+  if (ok) {
     CLOUD_ENABLED = true;
     console.log('%cCloud sync: ON', 'color:#22c55e');
   } else {
     console.warn('Cloud not available. Using local storage only.');
     loadLocal();
+    setCloudStatus('off');
   }
-  refreshAll();
+  // Ensure we always have something to show
+  if (!db.equipment || db.equipment.length === 0) {
+    seed();
+    await save();
+  } else {
+    refreshAll();
+  }
+  startCloudPullLoop();
 }
 
 // ==============================
@@ -872,6 +974,12 @@ document.getElementById('roleSelect')?.addEventListener('change', (e)=>{
 document.getElementById('btnCoachLogin')?.addEventListener('click', promptCoachLogin);
 document.getElementById('btnCoachLogout')?.addEventListener('click', coachLogout);
 
+// Cloud manual controls
+const btnPull = document.getElementById('btnForcePull');
+if (btnPull) btnPull.addEventListener('click', async ()=>{ await cloudLoad(); refreshAll(); });
+const btnPush = document.getElementById('btnForcePush');
+if (btnPush) btnPush.addEventListener('click', async ()=>{ await cloudSave(); });
+
 // Tabs
 Array.from(document.querySelectorAll('.tab')).forEach(t=>{
   t.onclick = ()=>{
@@ -884,6 +992,7 @@ Array.from(document.querySelectorAll('.tab')).forEach(t=>{
 
 // Boot
 applyRoleUI();
+setCloudStatus('checking');
 boot().then(()=>{ refillRequestSelectors(); refillSelectors(); });
 </script>
 </body>
