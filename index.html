@@ -3,12 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
   <title>C150 Equipment Manager (MVP)</title>
   <style>
     :root { --bg:#0f172a; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial; background: var(--bg); color: var(--text); }
-    body { font-size: 16px; line-height: 1.35; } /* better readability on iPhone */
+    body { font-size: 16px; line-height: 1.35; }
 
     header { position: sticky; top: 0; background: rgba(15,23,42,.9); backdrop-filter: blur(8px); border-bottom: 1px solid #1f2937; z-index: 10; }
     .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 16px; }
@@ -29,7 +30,7 @@
 
     label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
     input, select, textarea { width:100%; padding:12px; border:1px solid #334155; border-radius:12px; background:#0b1220; color:var(--text); }
-    input, select, textarea { min-height: 44px; } /* 44px tappable */
+    input, select, textarea { min-height: 44px; }
     textarea{ min-height: 100px; }
 
     .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -55,7 +56,7 @@
     .clickable { cursor: pointer; }
     .empty { text-align:center; color:var(--muted); padding:16px; }
 
-    /* --------- Mobile card tables --------- */
+    /* Mobile card tables */
     @media (max-width: 640px){
       table.resp { border:0; }
       table.resp thead { display:none; }
@@ -63,15 +64,9 @@
       table.resp tr { margin:10px 0; border:1px solid #263243; border-radius:12px; overflow:hidden; }
       table.resp td { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; padding:10px 12px; border-bottom:1px dashed #263243; }
       table.resp td:last-child { border-bottom:0; }
-      table.resp td::before {
-        content: attr(data-th);
-        color: var(--muted);
-        font-weight:600;
-        flex: 0 0 42%;
-        max-width: 42%;
-      }
+      table.resp td::before { content: attr(data-th); color: var(--muted); font-weight:600; flex: 0 0 42%; max-width: 42%; }
       table.resp td > * { flex: 1 1 58%; max-width: 58%; }
-      .btn { width: 100%; } /* buttons easier to tap inside rows */
+      .btn { width: 100%; }
     }
   </style>
 </head>
@@ -286,15 +281,28 @@
       <button class="btn" id="btnImport">Import JSON</button>
       <button class="btn bad" id="btnWipe">Wipe ALL Data</button>
     </div>
-    <p class="muted">Data is stored locally in your browser. Export regularly, or move to a hosted DB when ready.</p>
+    <p class="muted">Data is synced via Supabase when available; otherwise stored locally on this device.</p>
     <pre id="exportBox" style="white-space:pre-wrap; background:#0b1220; border:1px solid #334155; border-radius:12px; padding:12px; display:none;"></pre>
   </section>
 </main>
 
+<!-- Supabase client -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
 <script>
-// ------------------------------
-// Simple in-browser data store
-// ------------------------------
+// ==============================
+// Supabase config (shared DB)
+// ==============================
+const SUPABASE_URL = 'https://tglmzieiaokvohezxxlr.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnbG16aWVpYW9rdm9oZXp4eGxyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI0NDU0NDUsImV4cCI6MjA3ODAyMTQ0NX0.O_0BZx4WFeC2N93-eeW0W76QZP84M1mCqrcDtqy1-Mc';
+const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const CLOUD_TABLE = 'equipment_data';  // one-row JSON store
+const CLOUD_ROW_ID = 'singleton';
+let CLOUD_ENABLED = false;             // flips true if cloud is reachable
+
+// ==============================
+// In-browser app state (db)
+// ==============================
 const STORE_KEY = 'c150_equipment_v1';
 let db = {
   version: 1,
@@ -306,33 +314,11 @@ let db = {
 
 function uid() { return crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(36).slice(2); }
 function title(s){ return String(s||'').replace(/\b\w/g, c=>c.toUpperCase()); }
-function save() { localStorage.setItem(STORE_KEY, JSON.stringify(db)); refreshAll(); }
-function load() {
-  const raw = localStorage.getItem(STORE_KEY);
-  if (raw) {
-    try { db = JSON.parse(raw); } catch(e) { console.warn('Bad JSON, resetting'); }
-  }
-  if (!db.equipment?.length) seed();
-  refreshAll();
-}
-function seed(){
-  db.equipment = [
-    { id: uid(), kind:'boat', name:'Hudson USP 8+', status:'available', details:{boat_class:'8+', manufacturer:'Hudson', year:2021, weight_kg:95, rig_span_mm:1590, pitch_deg:2} },
-    { id: uid(), kind:'boat', name:'Empacher 2-', status:'maintenance', details:{boat_class:'2-', manufacturer:'Empacher', year:2018, weight_kg:27, rig_span_mm:1580, pitch_deg:2} },
-    { id: uid(), kind:'oar', name:'Croker P Set #3 (P/S)', status:'available', details:{side:'set', length_cm:286, inboard_cm:88, spoon:'Slick', set_name:'Set #3'} },
-    { id: uid(), kind:'misc', name:'Cox Box Gold #12', status:'out', details:{category:'Cox Box', serial:'CBG-0012'} },
-  ];
-  db.logs = [];
-  db.maintenance = [
-    { id: uid(), equipmentId: db.equipment[1].id, severity:'med', title:'Port Rigger Hairline Crack', desc:'Monitor, likely replace after Dartmouth', assignee:'Danny', status:'open', openedAt: Date.now(), closedAt:null }
-  ];
-  db.requests = [];
-}
-
-// ------------------------------
-// Helpers / rendering
-// ------------------------------
+function setEmptyState(id, show){ const n=$(id); if(!n) return; n.classList.toggle('hidden', !show); }
 const $ = sel => document.querySelector(sel);
+
+function fmtDate(ts){ const d = new Date(ts); return d.toLocaleString(); }
+function pill(status){ const s = String(status||'').toLowerCase(); return `<span class="pill ${s}">${title(s)}</span>`; }
 function el(tag, attrs={}, ...children){
   const e = document.createElement(tag);
   Object.entries(attrs).forEach(([k,v])=>{
@@ -344,7 +330,6 @@ function el(tag, attrs={}, ...children){
   children.forEach(c=> e.append(c));
   return e;
 }
-// td with data-th label (for mobile cards)
 function tdL(label, child, attrs={}) {
   const n = el('td', Object.assign({'data-th': label}, attrs));
   if (child instanceof Node) n.append(child);
@@ -352,27 +337,105 @@ function tdL(label, child, attrs={}) {
   return n;
 }
 
-function pill(status){ const s = String(status||'').toLowerCase(); return `<span class="pill ${s}">${title(s)}</span>`; }
-function fmtDate(ts){ const d = new Date(ts); return d.toLocaleString(); }
-function setEmptyState(id, show){ const n=$(id); if(!n) return; n.classList.toggle('hidden', !show); }
-
-function refreshAll(){
-  renderInventory();
-  refillSelectors();
-  renderLogs();
-  renderMaintenance();
-  refillRequestSelectors();
-  renderRequests();
-  applyRoleUI();
+// ==============================
+// Persistence: local & cloud
+// ==============================
+function saveLocal(){ localStorage.setItem(STORE_KEY, JSON.stringify(db)); }
+function loadLocal(){
+  const raw = localStorage.getItem(STORE_KEY);
+  if (raw) { try { db = JSON.parse(raw); } catch(e) { console.warn('Bad JSON, resetting'); } }
+  if (!db.equipment?.length) seed();
 }
 
-// ------------------------------
-// Coach auth (simple password)
-// ------------------------------
+// Cloud: single JSON row { id:'singleton', data: <db> }
+async function cloudLoad(){
+  try{
+    const { data, error } = await supa.from(CLOUD_TABLE).select('data').eq('id', CLOUD_ROW_ID).maybeSingle();
+    if(error){ console.warn('Cloud load error:', error.message); return false; }
+    if(data?.data){
+      db = data.data;
+    } else {
+      // first-time: push seed to cloud
+      if (!db.equipment?.length) seed();
+      await cloudSave();
+    }
+    return true;
+  } catch(err){
+    console.warn('Cloud load failed:', err);
+    return false;
+  }
+}
+async function cloudSave(){
+  try{
+    const payload = { id: CLOUD_ROW_ID, data: db };
+    const { error } = await supa.from(CLOUD_TABLE).upsert(payload);
+    if(error){ console.warn('Cloud save error:', error.message); return false; }
+    return true;
+  } catch(err){
+    console.warn('Cloud save failed:', err);
+    return false;
+  }
+}
+
+// The save() used by the rest of the app
+async function save(){
+  // always keep a local copy for offline
+  saveLocal();
+  refreshAll();
+  if(CLOUD_ENABLED){
+    const ok = await cloudSave();
+    if(!ok) console.warn('Cloud save skipped (error).');
+  }
+}
+
+async function boot(){
+  // Try cloud first; if the table doesn't exist, we’ll fall back to local.
+  const ok = await cloudLoad();
+  if(ok){
+    CLOUD_ENABLED = true;
+    console.log('%cCloud sync: ON', 'color:#22c55e');
+  } else {
+    console.warn('Cloud not available. Using local storage only.');
+    loadLocal();
+  }
+  refreshAll();
+}
+
+// ==============================
+// Seed data
+// ==============================
+function seed(){
+  db.equipment = [
+    { id: uid(), kind:'boat', name:'Hudson USP 8+', status:'available',
+      details:{boat_class:'8+', manufacturer:'Hudson', year:2021, weight_kg:95, rig_span_mm:1590, pitch_deg:2} },
+    { id: uid(), kind:'boat', name:'Empacher 2-', status:'maintenance',
+      details:{boat_class:'2-', manufacturer:'Empacher', year:2018, weight_kg:27, rig_span_mm:1580, pitch_deg:2} },
+    { id: uid(), kind:'oar', name:'Croker P Set #3 (P/S)', status:'available',
+      details:{side:'set', length_cm:286, inboard_cm:88, spoon:'Slick', set_name:'Set #3'} },
+    { id: uid(), kind:'misc', name:'Cox Box Gold #12', status:'out',
+      details:{category:'Cox Box', serial:'CBG-0012'} },
+  ];
+  db.logs = [];
+  db.maintenance = [
+    { id: uid(), equipmentId: null, severity:'med', title:'Port Rigger Hairline Crack',
+      desc:'Monitor, likely replace after Dartmouth', assignee:'Danny', status:'open',
+      openedAt: Date.now(), closedAt:null }
+  ];
+  db.requests = [];
+}
+
+// ==============================
+// Role / coach auth (client-side)
+// ==============================
 const COACH_PW = 'ColumbiaLion$$1754';
 const AUTH_KEY = 'c150_coach_auth';
+const ROLE_KEY = 'c150_role';
+
 function isCoachAuthed(){ return localStorage.getItem(AUTH_KEY) === '1'; }
 function setCoachAuth(b){ localStorage.setItem(AUTH_KEY, b ? '1' : '0'); }
+function getRole(){ return localStorage.getItem(ROLE_KEY) || 'athlete'; }
+function setRole(r){ localStorage.setItem(ROLE_KEY, r); applyRoleUI(); }
+function isCoachLike(){ return getRole()==='coach' && isCoachAuthed(); }
 
 function promptCoachLogin(){
   const pwd = prompt('Enter Coach Password');
@@ -381,16 +444,9 @@ function promptCoachLogin(){
 }
 function coachLogout(){ setCoachAuth(false); setRole('athlete'); alert('Signed out of Coach mode'); }
 
-// ROLE MANAGEMENT
-const ROLE_KEY = 'c150_role';
-function getRole(){ return localStorage.getItem(ROLE_KEY) || 'athlete'; }   // default ATHLETE
-function setRole(r){ localStorage.setItem(ROLE_KEY, r); applyRoleUI(); }
-function isCoachLike(){ return getRole()==='coach' && isCoachAuthed(); }
-
 function applyRoleUI(){
   const roleControls = document.getElementById('roleControls');
-  roleControls?.classList.toggle('hidden', !isCoachAuthed()); // hide selector unless authenticated
-
+  roleControls?.classList.toggle('hidden', !isCoachAuthed());
   const badge = document.getElementById('roleBadge');
   badge.textContent = title(isCoachLike() ? 'coach' : 'athlete');
 
@@ -403,28 +459,24 @@ function applyRoleUI(){
   document.getElementById('btnCoachLogout')?.classList.toggle('hidden', !isCoachAuthed());
 
   const sel = document.getElementById('roleSelect');
-  if(sel){
-    if(!isCoachAuthed()) sel.value = 'athlete';
-    else sel.value = getRole();
-  }
+  if(sel){ if(!isCoachAuthed()) sel.value = 'athlete'; else sel.value = getRole(); }
 
-  renderInventory();
-  renderMaintenance();
-  renderRequests();
+  renderInventory(); renderMaintenance(); renderRequests();
 }
 
-// ------------------------------
+// ==============================
 // Logging
-// ------------------------------
+// ==============================
 function logPush({equipmentId=null, action='', session='', cond='', note=''}) {
   db.logs.unshift({ id: uid(), ts: Date.now(), equipmentId, action, session, cond, note });
 }
 
-// INVENTORY LIST + FILTERS
+// ==============================
+// Inventory
+// ==============================
 let searchTimer;
 function renderInventory(){
-  const rows = $('#inventoryRows');
-  rows.innerHTML = '';
+  const rows = $('#inventoryRows'); rows.innerHTML = '';
   const k = $('#fKind').value.trim();
   const s = $('#fStatus').value.trim();
   const q = $('#fSearch').value.trim().toLowerCase();
@@ -463,38 +515,21 @@ function actionButtons(it){
   const status = el('button', {class:'btn ' + (it.status==='available'?'warn':it.status==='out'?'ok':'primary'), style:'flex:1;'},
                     it.status==='available'?'Set Out':it.status==='out'?'Set Available':'Set Available');
 
-  edit.onclick = ()=> {
-    if(!isCoachLike()) return alert('Coach access required');
-    openItemModal(it.id);
-  };
-  del.onclick = ()=> {
-    if(!isCoachLike()) return alert('Coach access required');
-    if(confirm('Delete This Item?')) {
-      db.equipment = db.equipment.filter(x=>x.id!==it.id);
-      logPush({equipmentId: it.id, action:'equipment_delete', note: it.name});
-      save();
-    }
-  };
-  status.onclick = ()=> {
-    if(!isCoachLike()) return alert('Coach access required');
+  edit.onclick = ()=>{ if(!isCoachLike()) return alert('Coach access required'); openItemModal(it.id); };
+  del.onclick = ()=>{ if(!isCoachLike()) return alert('Coach access required');
+    if(confirm('Delete This Item?')) { db.equipment = db.equipment.filter(x=>x.id!==it.id);
+      logPush({equipmentId: it.id, action:'equipment_delete', note: it.name}); save(); } };
+  status.onclick = ()=>{ if(!isCoachLike()) return alert('Coach access required');
     const newStatus = it.status==='out' ? 'available' : 'out';
     it.status = newStatus;
-    logPush({equipmentId: it.id, action:'equipment_status', note: `${it.name} → ${newStatus}`});
-    save();
-  };
+    logPush({equipmentId: it.id, action:'equipment_status', note: `${it.name} → ${newStatus}`}); save(); };
 
-  if(isCoachLike()){
-    wrap.append(edit, del, status);
-  } else {
-    const txt = document.createElement('span');
-    txt.className = 'muted';
-    txt.textContent = 'View Only';
-    wrap.append(txt);
-  }
+  if(isCoachLike()) wrap.append(edit, del, status);
+  else wrap.append(el('span',{class:'muted'}, 'View Only'));
   return wrap;
 }
 
-// ITEM MODAL (coach-only)
+// Item modal
 function openItemModal(id){
   if(!isCoachLike()) { alert('Coach access required'); return; }
   const existing = id ? db.equipment.find(e=>e.id===id) : null;
@@ -578,24 +613,25 @@ function openItemModal(id){
 }
 function mkL(lbl, node){ const w = el('div',{}); w.append(el('label',{},lbl), node); return w; }
 
-// SELECT FILLERS (maintenance)
+// ==============================
+// Select fillers
+// ==============================
 function refillSelectors(){
   const opts = db.equipment.map(e=>({id:e.id, name:`${e.name} — ${title(e.kind)}`}));
   function fill(sel){ if(!sel) return; sel.innerHTML=''; opts.forEach(o=> sel.append(el('option',{value:o.id}, o.name))); }
   fill($('#mntItem'));
 }
 
-// ----- Athlete Requests -----
+// ==============================
+// Athlete Requests
+// ==============================
 function seatCountForBoat(boat){
   const cls = (boat?.details?.boat_class || boat?.details?.class || boat?.name || '').toString();
   const m = cls.match(/(1|2|4|8)/);
-  let n = m ? parseInt(m[1],10) : 8; // default to 8
+  let n = m ? parseInt(m[1],10) : 8;
   return Math.max(1, Math.min(8, n));
 }
-function hasCoxSeat(boat){
-  const cls = (boat?.details?.boat_class || boat?.name || '').toString();
-  return cls.includes('+');
-}
+function hasCoxSeat(boat){ const cls = (boat?.details?.boat_class || boat?.name || '').toString(); return cls.includes('+'); }
 function refillRequestSelectors(){
   const boatSel = document.getElementById('reqBoat');
   const seatSel = document.getElementById('reqSeat');
@@ -665,7 +701,9 @@ function renderRequests(){
   });
 }
 
-// LOGS
+// ==============================
+// Logs
+// ==============================
 function renderLogs(){
   const tbody = $('#logRows'); tbody.innerHTML='';
   setEmptyState('#logsEmpty', db.logs.length===0);
@@ -683,7 +721,9 @@ function renderLogs(){
   });
 }
 
-// MAINTENANCE
+// ==============================
+// Maintenance
+// ==============================
 function createTicket(){
   if(!isCoachLike()) { alert('Coach access required'); return; }
   const equipmentId = $('#mntItem').value; const item = db.equipment.find(e=>e.id===equipmentId);
@@ -724,7 +764,6 @@ function renderMaintenance(){
     tbody.append(tr);
   });
 }
-
 function maintActions(t){
   const wrap = el('div', {class:'row', style:'width:100%;'});
   const view = el('button', {class:'btn', style:'flex:1;'}, 'View');
@@ -740,8 +779,6 @@ function maintActions(t){
   wrap.append(view, done, reopen, del);
   return wrap;
 }
-
-// Ticket detail modal
 function openTicketModal(ticketId){
   const t = db.maintenance.find(x=>x.id===ticketId);
   const item = db.equipment.find(e=>e.id===t?.equipmentId);
@@ -765,10 +802,7 @@ function openTicketModal(ticketId){
     mkL('Status', el('div',{}, title(t.status))),
     mkL('Opened', el('div',{}, fmtDate(t.openedAt))),
   );
-
-  if(t.closedAt){
-    grid.append(mkL('Closed', el('div',{}, fmtDate(t.closedAt))));
-  }
+  if(t.closedAt){ grid.append(mkL('Closed', el('div',{}, fmtDate(t.closedAt)))); }
 
   const descBox = el('div', {style:'margin-top:12px;'});
   descBox.append(el('label',{}, 'Description'));
@@ -790,45 +824,49 @@ function openTicketModal(ticketId){
   overlay.append(card);
   document.body.appendChild(overlay);
 }
+function mkL(lbl, node){ const w = el('div',{}); w.append(el('label',{},lbl), node); return w; }
 
-// DATA IO
+// ==============================
+// Data IO
+// ==============================
 function exportJSON(){ const data = JSON.stringify(db, null, 2); const box = $('#exportBox'); box.style.display='block'; box.textContent = data; }
 function importJSON(file){
   const reader = new FileReader();
-  reader.onload = e => {
+  reader.onload = async e => {
     try{
       const incoming = JSON.parse(e.target.result);
       if(!incoming.equipment) throw new Error('Invalid file');
       db = incoming;
-      save(); alert('Import Successful');
+      await save();
+      alert('Import Successful');
     } catch(err){ alert('Import Failed: '+err.message); }
   };
   reader.readAsText(file);
 }
-function wipeAll(){ if(confirm('This Deletes ALL Data In This Browser. Proceed?')){ localStorage.removeItem(STORE_KEY); db={version:1,equipment:[], logs:[], maintenance:[], requests:[]}; seed(); save(); }}
+async function wipeAll(){
+  if(confirm('This Deletes ALL Data. Proceed?')){
+    localStorage.removeItem(STORE_KEY);
+    db={version:1,equipment:[], logs:[], maintenance:[], requests:[]}; seed(); await save();
+  }
+}
 
-// EVENTS
+// ==============================
+// Events
+// ==============================
 document.getElementById('btnNew').onclick = ()=> openItemModal();
 ['#fKind','#fStatus'].forEach(sel=> $(sel).addEventListener('input', renderInventory));
-document.getElementById('fSearch').addEventListener('input', ()=>{
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(renderInventory, 150);
-});
+document.getElementById('fSearch').addEventListener('input', ()=>{ clearTimeout(searchTimer); searchTimer = setTimeout(renderInventory, 150); });
 document.getElementById('btnMntCreate').onclick = createTicket;
 document.getElementById('btnExport').onclick = exportJSON;
 document.getElementById('btnImport').onclick = ()=>{ const f = document.getElementById('fileImport').files?.[0]; if(!f) return alert('Choose A JSON File To Import'); importJSON(f); };
-document.getElementById('btnWipe').onclick = wipeAll;
-document.getElementById('btnClearLogs').onclick = ()=>{ if(confirm('Clear All Logs?')){ db.logs=[]; save(); } };
+document.getElementById('btnWipe').onclick = ()=>{ wipeAll(); };
+document.getElementById('btnClearLogs').onclick = async ()=>{ if(confirm('Clear All Logs?')){ db.logs=[]; await save(); } };
 // Requests
 document.getElementById('btnReqSubmit')?.addEventListener('click', submitRequest);
-// Role select (requires coach auth)
+// Role select
 document.getElementById('roleSelect')?.addEventListener('change', (e)=>{
   const val = e.target.value;
-  if(val==='coach' && !isCoachAuthed()){
-    promptCoachLogin();
-  } else {
-    setRole(val);
-  }
+  if(val==='coach' && !isCoachAuthed()){ promptCoachLogin(); } else { setRole(val); }
 });
 // Coach login/logout buttons
 document.getElementById('btnCoachLogin')?.addEventListener('click', promptCoachLogin);
@@ -846,8 +884,7 @@ Array.from(document.querySelectorAll('.tab')).forEach(t=>{
 
 // Boot
 applyRoleUI();
-load();
-refillRequestSelectors();
+boot().then(()=>{ refillRequestSelectors(); refillSelectors(); });
 </script>
 </body>
 </html>
